@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "khinsider-scraper"
+version = "0.1.0"
+description = "scrapes a definitely legal site for definitely legally distributed songs"
+authors = ["Astrid Yu <astrid@astrid.tech>"]
+license = "AGPL-3.0"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+aiohttp = "^3.8.1"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.1.2"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
