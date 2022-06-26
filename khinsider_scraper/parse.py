@@ -2,6 +2,18 @@ from typing import Iterable, NamedTuple, Optional
 import bs4
 import re
 
+from slugify import slugify
+
+
+class SongInfo(NamedTuple):
+    cd: Optional[int]
+    number: int
+    album_name: str
+    album_id: str
+    song_name: str
+    file_path: str
+    url: str
+
 
 def get_last_letter_page(soup: bs4.BeautifulSoup) -> int:
     anchor = soup.select_one('.pagination .pagination-end a')
@@ -30,20 +42,42 @@ def get_album_links_on_letter_page(soup: bs4.BeautifulSoup) -> Iterable[str]:
     return ('https://downloads.khinsider.com' + u for u in get_hrefs(soup.select('.albumList tr .albumIcon a')))
 
 
-def get_songs_on_album_page(soup: bs4.BeautifulSoup) -> Iterable[str]:
-    return ('https://downloads.khinsider.com' + u for u in get_hrefs(soup.select('#songlist tr .playlistDownloadSong a')))
+def get_songs_on_album_page(soup: bs4.BeautifulSoup, url: str) -> Iterable[SongInfo]:
+    album_id = re.search('/game-soundtracks/album/(.*)/?.*', url).group(1)
+    album_name = soup.select_one('#pageContent > h2:first-of-type').text
 
+    header = [x.text.strip().lower() for x in soup.select('#songlist_header th')]
+    try:
+        cd_index = header.index('cd')
+    except ValueError:
+        cd_index = None
+    num_index = header.index('#')
+    songname_index = header.index('song name')
 
-class SongInfo(NamedTuple):
-    album: str
-    song: str
-    url: str
+    for row in soup.select('#songlist tr:not(:first-child):not(:last-child)'):
+        tds = list(row.select('td'))
 
+        cd = None
+        filename = ''
+        if cd_index:
+            cd = int(tds[cd_index].text.strip())
+            filename = str(cd) + '-'
 
-def get_song_slug_from_url(url: str) -> Optional[SongInfo]:
-    match = re.match(
-        r'https://downloads.khinsider.com/game-soundtracks/album/(.+)/(.*)', url)
-    if match is None:
-        return None
-    album, song = match.groups()
-    return SongInfo(album=album, song=song, url=url)
+        num = int(tds[num_index].text.strip()[:-1])
+        filename += str(num) + '-'
+
+        song_name = tds[songname_index].text.strip()
+        filename += song_name
+
+        url = 'https://downloads.khinsider.com' + row.select_one('.playlistDownloadSong a').attrs['href']
+
+        file_path = album_id + '/' + slugify(filename) + '.mp3'
+        yield SongInfo(
+            cd=cd,
+            number=num,
+            album_name=album_name,
+            album_id=album_id,
+            song_name=song_name,
+            file_path=file_path,
+            url=url,
+        )

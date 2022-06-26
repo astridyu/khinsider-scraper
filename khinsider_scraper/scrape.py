@@ -1,16 +1,18 @@
 
 
 import asyncio
+import csv
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import sys
 from tempfile import TemporaryFile
 import time
 from typing import Iterable, List, NamedTuple
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 
-from khinsider_scraper.parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_song_slug_from_url, get_songs_on_album_page
+from khinsider_scraper.parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_songs_on_album_page
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,8 @@ logger = logging.getLogger(__name__)
 letter_url_fmt = "https://downloads.khinsider.com/game-soundtracks/browse/{}"
 letters = ["%23"] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 letter_urls = [letter_url_fmt.format(l) for l in letters]
+
+csvwriter = csv.writer(sys.stdout)
 
 
 class FetchTask:
@@ -35,11 +39,12 @@ class AlbumFetch(FetchTask):
         html = await res.read()
         soup = BeautifulSoup(html, features='html5lib')
         infos = [
-            SongFetch(get_song_slug_from_url(self.url + song_url))
+            get_song_slug_from_url(self.url + song_url)
             for song_url in get_songs_on_album_page(soup)
         ]
         logger.info(f'Found {len(infos)} songs at {self.url}')
-        return infos
+        for info in infos:
+            csvwriter.writerow((info.album, info.song, info.url))
 
 
 @dataclass
@@ -105,6 +110,7 @@ class SongFetch(FetchTask):
 
 async def download_all_song_infos(cs: ClientSession, max_queuesize=10000, n_workers=30) -> Iterable[SongInfo]:
     logger.info("Initializing")
+    print('album,song,url')
 
     task_queue: asyncio.Queue[FetchTask] = asyncio.Queue(maxsize=max_queuesize)
     for letter in letter_urls:
