@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryFile
 import time
+from traceback import print_exception
 from typing import Iterable, List, NamedTuple
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
@@ -21,11 +22,9 @@ letter_url_fmt = "https://downloads.khinsider.com/game-soundtracks/browse/{}"
 letters = ["%23"] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 letter_urls = [letter_url_fmt.format(l) for l in letters]
 
-csvwriter = csv.writer(sys.stdout)
-
 
 class FetchTask:
-    async def fetch(self, cs: ClientSession) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
         raise NotImplemented
 
 
@@ -33,25 +32,23 @@ class FetchTask:
 class AlbumFetch(FetchTask):
     url: str
 
-    async def fetch(self, cs: ClientSession) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
         logger.info(f'Fetching album at URL {self.url}')
         res = await cs.get(self.url)
         html = await res.read()
         soup = BeautifulSoup(html, features='html5lib')
-        infos = [
-            get_song_slug_from_url(self.url + song_url)
-            for song_url in get_songs_on_album_page(soup)
-        ]
+        infos = list(get_songs_on_album_page(soup, self.url))
         logger.info(f'Found {len(infos)} songs at {self.url}')
         for info in infos:
-            csvwriter.writerow((info.album, info.song, info.url))
+            csvwriter.writerow(info)
+        return []
 
 
 @dataclass
 class LetterPageFetch(FetchTask):
     url: str
 
-    async def fetch(self, cs: ClientSession) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
         logger.info(f'Fetching letter page at URL {self.url}')
         res = await cs.get(self.url)
         html = await res.read()
@@ -66,7 +63,7 @@ class LetterPageFetch(FetchTask):
 class LetterFetch(FetchTask):
     url: str
 
-    async def fetch(self, cs: ClientSession) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
         logger.info(f'Fetching information about letter at URL {self.url}')
         res = await cs.get(self.url)
         html = await res.read()
@@ -83,34 +80,34 @@ class LetterFetch(FetchTask):
         return result()
 
 
-@dataclass
-class SongFetch(FetchTask):
-    info: SongInfo
+async def fetch_and_store_song(info: SongInfo, cs: ClientSession) -> Iterable['FetchTask']:
+    dest: Path = Path('songs') / info.file_path
 
-    async def fetch(self, cs: ClientSession) -> Iterable['FetchTask']:
-        info = self.info
-        dest: Path = Path('downloaded') / info.album / info.song
+    if dest.exists():
+        logger.info(f'{str(dest)} already exists')
+        return
 
-        if dest.exists():
-            logger.info(f'{str(dest)} already exists')
-            return
+    res = await cs.get(info)
 
-        dest.parent.mkdir()
-        res = await cs.get(info)
+    # First download to a temporary file so that incomplete files don't make their way into the results
+    tempfile: Path = Path('.songcache') / info.file_path
+    tempfile.parent.mkdir()
+    tempfile = dest.with_suffix('.tmp')
+    with tempfile.open("wb") as f:
+        async for data in res.content.iter_chunked(1024):
+            f.write(data)
 
-        # To atomically create the file, write download to a temp file.
-        tempfile = dest.with_suffix('.tmp')
-        with tempfile.open("wb") as f:
-            async for data in res.content.iter_chunked(1024):
-                f.write(data)
-
-        tempfile.rename(dest)
-        logger.info(f'Downloaded {info.url} to {dest}')
+    # Move the temporary file into the destination
+    dest.parent.mkdir()
+    tempfile.rename(dest)
+    logger.info(f'Downloaded {info.url} to {dest}')
+    return []
 
 
 async def download_all_song_infos(cs: ClientSession, max_queuesize=10000, n_workers=30) -> Iterable[SongInfo]:
     logger.info("Initializing")
-    print('album,song,url')
+    csvwriter = csv.writer(sys.stdout)
+    csvwriter.writerow(SongInfo._fields)
 
     task_queue: asyncio.Queue[FetchTask] = asyncio.Queue(maxsize=max_queuesize)
     for letter in letter_urls:
@@ -120,9 +117,12 @@ async def download_all_song_infos(cs: ClientSession, max_queuesize=10000, n_work
         while True:
             task = await task_queue.get()
             logger.debug("Got queue item %s", task)
-            result = await task.fetch(cs)
-            for i in result:
-                await task_queue.put(i)
+            try:
+                result = await task.fetch(cs, csvwriter)
+                for i in result:
+                    await task_queue.put(i)
+            except Exception:
+                logger.exception('Error while fetching object %s', task)
 
     tasks = [
         asyncio.create_task(worker())

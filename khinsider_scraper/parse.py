@@ -6,8 +6,7 @@ from slugify import slugify
 
 
 class SongInfo(NamedTuple):
-    cd: Optional[int]
-    number: int
+    index: int
     album_name: str
     album_id: str
     song_name: str
@@ -47,34 +46,17 @@ def get_songs_on_album_page(soup: bs4.BeautifulSoup, url: str) -> Iterable[SongI
     album_name = soup.select_one('#pageContent > h2:first-of-type').text
 
     header = [x.text.strip().lower() for x in soup.select('#songlist_header th')]
-    try:
-        cd_index = header.index('cd')
-    except ValueError:
-        cd_index = None
-    num_index = header.index('#')
     songname_index = header.index('song name')
 
-    for row in soup.select('#songlist tr:not(:first-child):not(:last-child)'):
+    for i, row in enumerate(soup.select('#songlist tr:not(:first-child):not(:last-child)')):
         tds = list(row.select('td'))
-
-        cd = None
-        filename = ''
-        if cd_index:
-            cd = int(tds[cd_index].text.strip())
-            filename = str(cd) + '-'
-
-        num = int(tds[num_index].text.strip()[:-1])
-        filename += str(num) + '-'
-
         song_name = tds[songname_index].text.strip()
-        filename += song_name
 
         url = 'https://downloads.khinsider.com' + row.select_one('.playlistDownloadSong a').attrs['href']
 
-        file_path = album_id + '/' + slugify(filename) + '.mp3'
+        file_path = album_id + '/' + slugify(song_name) + '.mp3'
         yield SongInfo(
-            cd=cd,
-            number=num,
+            index=i,
             album_name=album_name,
             album_id=album_id,
             song_name=song_name,
