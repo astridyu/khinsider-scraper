@@ -7,12 +7,12 @@ def get_last_letter_page(soup: bs4.BeautifulSoup) -> int:
     anchor = soup.select_one('.pagination .pagination-end a')
     if anchor is None:
         return 1
-    
+
     href = anchor.attrs.get('href')
     if href is None:
         return 1
-    
-    match = re.search(r'\?page=(\d+)', href)
+
+    match = re.search(r'page=(\d+)', href)
     if match is None or match.group(1) is None:
         return 1
 
@@ -27,23 +27,23 @@ def get_hrefs(tags: Iterable[bs4.Tag]) -> Iterable[str]:
 
 
 def get_album_links_on_letter_page(soup: bs4.BeautifulSoup) -> Iterable[str]:
-    return get_hrefs(soup.select('.albumList tr .albumIcon a'))
+    return ('https://downloads.khinsider.com' + u for u in get_hrefs(soup.select('.albumList tr .albumIcon a')))
 
 
 def get_songs_on_album_page(soup: bs4.BeautifulSoup) -> Iterable[str]:
-    return get_hrefs(soup.select('#songlist tr .playlistDownloadSong a'))
+    return ('https://downloads.khinsider.com' + u for u in get_hrefs(soup.select('#songlist tr .playlistDownloadSong a')))
 
 
 class SongInfo(NamedTuple):
     album: str
-    song: Optional[str]
+    song: str
     url: str
 
 
 def get_song_slug_from_url(url: str) -> Optional[SongInfo]:
-    match = re.match(r'https://downloads.khinsider.com/game-soundtracks/album/(.+)/(.*)', url)
+    match = re.match(
+        r'https://downloads.khinsider.com/game-soundtracks/album/(.+)/(.*)', url)
     if match is None:
         return None
-    _, album, song = match.groups()
+    album, song = match.groups()
     return SongInfo(album=album, song=song, url=url)
-
