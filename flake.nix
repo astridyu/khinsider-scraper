@@ -1,29 +1,34 @@
 {
-    inputs = {
-        nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-        utils.url = "github:numtide/flake-utils";
-    };
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    utils.url = "github:numtide/flake-utils";
+  };
 
-    outputs = {self, nixpkgs, utils}:
-    let out = system:
-    let pkgs = nixpkgs.legacyPackages."${system}";
-    in {
+  outputs = { self, nixpkgs, utils }:
+    let
+      out = system:
+        let pkgs = nixpkgs.legacyPackages."${system}";
+        in {
 
-        devShell = pkgs.mkShell {
-            buildInputs = with pkgs; [
-                python3Packages.poetry
-            ];
+          devShell = pkgs.mkShell {
+            buildInputs = with pkgs; [ python3Packages.poetry ];
+          };
+
+          packages = {
+            default = self.packages.${system}.khinsider-scraper;
+            khinsider-scraper = with pkgs.poetry2nix;
+              mkPoetryApplication {
+                projectDir = ./.;
+                preferWheels = true;
+              };
+          };
+
+          apps = {
+            khinsider-scraper =
+              utils.lib.mkApp { drv = self.packages."${system}".khinsider-scraper; };
+            default = self.apps.${system}.khinsider-scraper;
+          };
         };
-
-        defaultPackage = with pkgs.poetry2nix; mkPoetryApplication {
-            projectDir = ./.;
-            preferWheels = true;
-        };
-
-        defaultApp = utils.lib.mkApp {
-            drv = self.defaultPackage."${system}";
-        };
-
-    }; in with utils.lib; eachSystem defaultSystems out;
+    in with utils.lib; eachSystem defaultSystems out;
 
 }
