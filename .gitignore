@@ -3,6 +3,7 @@ secrets.py
 runs
 .ipynb_*
 *.csv
+*.db
 .direnv
 .songcache
 songs

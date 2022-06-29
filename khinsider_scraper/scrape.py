@@ -21,23 +21,56 @@ from .parse import SongInfo, get_album_links_on_letter_page, get_last_letter_pag
 
 logger = logging.getLogger(__name__)
 
-
-letter_url_fmt = "https://downloads.khinsider.com/game-soundtracks/browse/{}"
-letters = ["%23"] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-letter_urls = [letter_url_fmt.format(l) for l in letters]
 max_attempts = 10
 
 
+class ScrapeContext(NamedTuple):
+    cs: ClientSession
+    db: Connection
+    exec: Executor
+
+
+async def build_index(ctx: ScrapeContext) -> Iterable[SongInfo]:
+    logger.info("Initializing")
+
+    create_tables(ctx.db)
+    await enumerate_pages(ctx)
+
+
+async def enumerate_pages(ctx: ScrapeContext):
+    if ctx.db.execute('SELECT COUNT(*) FROM albumpages').fetchone()[0] > 0:
+        logger.info(f'Song page count already enumerated')
+        return
+
+    logger.info(f'Counting number of pages of songs')
+    res = await ctx.cs.get("https://downloads.khinsider.com/game-soundtracks")
+    html = await res.read()
+
+    soup1 = BeautifulSoup(html, features='html5lib')
+    count = get_last_letter_page(soup1)
+    logger.info(f'There are {count} pages of songs')
+    links = get_album_links_on_letter_page(soup1)
+
+    ctx.db.executemany(
+        'INSERT INTO albums(album_url) VALUES (?)',
+        ((l,) for l in links)
+    )
+    ctx.db.executemany(
+        'INSERT INTO albumpages(page, visited) VALUES (?, ?)',
+        [(1, 1)] + [(i, 0) for i in range(2, count + 1)]
+    )
+
+
+async def enumerate_albums(ctx: ScrapeContext):
+    tasks = [
+        asyncio.create_task(fetch_album_listing(ctx, f"https://downloads.khinsider.com/game-soundtracks?page={page}"))
+        for page, in ctx.db.execute('SELECT page FROM albumpages WHERE visited = 0')
+    ]
+    asyncio.gather(*tasks)
 
 class FetchTask:
     async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
         raise NotImplemented
-
-
-def offloaded(pool: Executor):
-    async def decorator(func):
-        return asyncio.get_event_loop().run_in_executor(pool, func)
-    return decorator
 
 
 @dataclass
@@ -80,24 +113,21 @@ class AlbumFetch(FetchTask):
         return (SongFetch(info) for info in infos)
 
 
-@dataclass
-class LetterPageFetch(FetchTask):
-    url: str
+async def fetch_album_listing(ctx: ScrapeContext, url: str):
+    logger.info(f'Fetching letter page at URL {url}')
+    res = await ctx.cs.get(url)
+    html = await res.read()
 
-    async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
-        logger.info(f'Fetching letter page at URL {self.url}')
-        res = await cs.get(self.url)
-        html = await res.read()
+    def parse():
+        soup = BeautifulSoup(html, features='html5lib')
+        links = get_album_links_on_letter_page(soup)
+        return links
 
-        def parse():
-            soup = BeautifulSoup(html, features='html5lib')
-            links = get_album_links_on_letter_page(soup)
-            return links
-
-        urls = await asyncio.get_event_loop().run_in_executor(pool, parse)
-
-        return (AlbumFetch(url) for url in urls)
-
+    links = await asyncio.get_event_loop().run_in_executor(ctx.exec, parse)
+    ctx.db.executemany(
+        'INSERT INTO albums(album_url) VALUES (?)',
+        ((l,) for l in links)        
+    )
 
 @dataclass
 class LetterFetch(FetchTask):
@@ -194,10 +224,3 @@ async def download_all_song_infos(cs: ClientSession, db: Connection, n_workers=5
     # Wait until all worker tasks are cancelled.
     await asyncio.gather(*tasks, return_exceptions=True)
 
-
-class ScrapeContext(NamedTuple):
-    cs: ClientSession
-    db: Connection
-
-async def find_all_letter_pages(ctx: ScrapeContext):
-    
