@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import logging
 from multiprocessing.dummy import current_process
 from pathlib import Path
+from sqlite3 import Connection
 import sys
 from tempfile import TemporaryFile
 import time
@@ -14,8 +15,9 @@ from traceback import print_exception
 from typing import Iterable, List, NamedTuple, TextIO
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
+from .model import create_tables
 
-from khinsider_scraper.parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_mp3_on_song_page, get_songs_on_album_page
+from .parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_mp3_on_song_page, get_songs_on_album_page
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ letter_url_fmt = "https://downloads.khinsider.com/game-soundtracks/browse/{}"
 letters = ["%23"] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 letter_urls = [letter_url_fmt.format(l) for l in letters]
 max_attempts = 10
+
 
 
 class FetchTask:
@@ -146,10 +149,10 @@ async def fetch_and_store_song(song: SongInfo, cs: ClientSession) -> Iterable['F
     return []
 
 
-async def download_all_song_infos(cs: ClientSession, out_file: TextIO, n_workers=50) -> Iterable[SongInfo]:
+async def download_all_song_infos(cs: ClientSession, db: Connection, n_workers=50) -> Iterable[SongInfo]:
     logger.info("Initializing")
-    csvwriter = csv.writer(out_file)
-    csvwriter.writerow(SongInfo._fields)
+
+    create_tables(db)
 
     task_queue: asyncio.Queue[FetchTask] = asyncio.Queue()
     for letter in letter_urls:
@@ -190,3 +193,11 @@ async def download_all_song_infos(cs: ClientSession, out_file: TextIO, n_workers
 
     # Wait until all worker tasks are cancelled.
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class ScrapeContext(NamedTuple):
+    cs: ClientSession
+    db: Connection
+
+async def find_all_letter_pages(ctx: ScrapeContext):
+    
