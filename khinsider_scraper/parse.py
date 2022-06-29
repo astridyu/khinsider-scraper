@@ -12,6 +12,7 @@ class SongInfo(NamedTuple):
     song_name: str
     file_path: str
     url: str
+    """This value may either point to the song page path or the MP3 path. In the written index, this will point to the MP3 path."""
 
 
 def get_last_letter_page(soup: bs4.BeautifulSoup) -> int:
@@ -54,7 +55,7 @@ def get_songs_on_album_page(soup: bs4.BeautifulSoup, url: str) -> Iterable[SongI
 
         url = 'https://downloads.khinsider.com' + row.select_one('.playlistDownloadSong a').attrs['href']
 
-        file_path = album_id + '/' + slugify(song_name) + '.mp3'
+        file_path = album_id + '/' + str(i) + '-' + slugify(song_name) + '.mp3'
         yield SongInfo(
             index=i,
             album_name=album_name,
@@ -63,3 +64,7 @@ def get_songs_on_album_page(soup: bs4.BeautifulSoup, url: str) -> Iterable[SongI
             file_path=file_path,
             url=url,
         )
+
+
+def get_mp3_on_song_page(soup: bs4.BeautifulSoup) -> str:
+    return soup.select_one('audio').attrs['src']

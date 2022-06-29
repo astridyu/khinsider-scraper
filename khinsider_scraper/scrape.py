@@ -15,7 +15,7 @@ from typing import Iterable, List, NamedTuple, TextIO
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 
-from khinsider_scraper.parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_songs_on_album_page
+from khinsider_scraper.parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_mp3_on_song_page, get_songs_on_album_page
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,26 @@ def offloaded(pool: Executor):
 
 
 @dataclass
+class SongFetch(FetchTask):
+    song: SongInfo
+
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
+        logger.info(f'Fetching song at URL {self.song.url}')
+        res = await cs.get(self.url)
+        html = await res.read()
+
+        def parse():
+            soup = BeautifulSoup(html, features='html5lib')
+            mp3 = get_mp3_on_song_page(soup, self.url)
+            return mp3
+
+        mp3 = await asyncio.get_event_loop().run_in_executor(pool, parse)
+
+        csvwriter.writerow(self.song._replace(url=mp3))
+        return []
+
+
+@dataclass
 class AlbumFetch(FetchTask):
     url: str
 
@@ -49,14 +69,12 @@ class AlbumFetch(FetchTask):
         def parse():
             soup = BeautifulSoup(html, features='html5lib')
             infos = list(get_songs_on_album_page(soup, self.url))
-            logger.info(f'Found {len(infos)} songs at {self.url}')
             return infos
 
         infos = await asyncio.get_event_loop().run_in_executor(pool, parse)
+        logger.info(f'Found {len(infos)} songs at {self.url}')
 
-        for info in infos:
-            csvwriter.writerow(info)
-        return []
+        return (SongFetch(info) for info in infos)
 
 
 @dataclass
