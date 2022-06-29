@@ -1,9 +1,11 @@
 
 
 import asyncio
+from concurrent.futures import Executor, ThreadPoolExecutor
 import csv
 from dataclasses import dataclass
 import logging
+from multiprocessing.dummy import current_process
 from pathlib import Path
 import sys
 from tempfile import TemporaryFile
@@ -25,21 +27,33 @@ max_attempts = 10
 
 
 class FetchTask:
-    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
         raise NotImplemented
+
+
+def offloaded(pool: Executor):
+    async def decorator(func):
+        return asyncio.get_event_loop().run_in_executor(pool, func)
+    return decorator
 
 
 @dataclass
 class AlbumFetch(FetchTask):
     url: str
 
-    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
         logger.info(f'Fetching album at URL {self.url}')
         res = await cs.get(self.url)
         html = await res.read()
-        soup = BeautifulSoup(html, features='html5lib')
-        infos = list(get_songs_on_album_page(soup, self.url))
-        logger.info(f'Found {len(infos)} songs at {self.url}')
+
+        def parse():
+            soup = BeautifulSoup(html, features='html5lib')
+            infos = list(get_songs_on_album_page(soup, self.url))
+            logger.info(f'Found {len(infos)} songs at {self.url}')
+            return infos
+
+        infos = await asyncio.get_event_loop().run_in_executor(pool, parse)
+
         for info in infos:
             csvwriter.writerow(info)
         return []
@@ -49,31 +63,40 @@ class AlbumFetch(FetchTask):
 class LetterPageFetch(FetchTask):
     url: str
 
-    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
         logger.info(f'Fetching letter page at URL {self.url}')
         res = await cs.get(self.url)
         html = await res.read()
-        soup = BeautifulSoup(html, features='html5lib')
-        return (
-            AlbumFetch(url)
-            for url in get_album_links_on_letter_page(soup)
-        )
+
+        def parse():
+            soup = BeautifulSoup(html, features='html5lib')
+            links = get_album_links_on_letter_page(soup)
+            return links
+
+        urls = await asyncio.get_event_loop().run_in_executor(pool, parse)
+
+        return (AlbumFetch(url) for url in urls)
 
 
 @dataclass
 class LetterFetch(FetchTask):
     url: str
 
-    async def fetch(self, cs: ClientSession, csvwriter: csv.writer) -> Iterable['FetchTask']:
+    async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
         logger.info(f'Fetching information about letter at URL {self.url}')
         res = await cs.get(self.url)
         html = await res.read()
 
-        soup1 = BeautifulSoup(html, features='html5lib')
-        count = get_last_letter_page(soup1)
+        def parse():
+            soup1 = BeautifulSoup(html, features='html5lib')
+            count = get_last_letter_page(soup1)
+            links = get_album_links_on_letter_page(soup1)
+            return count, links
+
+        count, links = await asyncio.get_event_loop().run_in_executor(pool, parse)
 
         def result():
-            for url in get_album_links_on_letter_page(soup1):
+            for url in links:
                 yield AlbumFetch(url)
             for i in range(2, count + 1):
                 yield LetterPageFetch(self.url + '?page=' + str(i))
@@ -105,7 +128,7 @@ async def fetch_and_store_song(song: SongInfo, cs: ClientSession) -> Iterable['F
     return []
 
 
-async def download_all_song_infos(cs: ClientSession, out_file: TextIO, n_workers=800) -> Iterable[SongInfo]:
+async def download_all_song_infos(cs: ClientSession, out_file: TextIO, n_workers=50) -> Iterable[SongInfo]:
     logger.info("Initializing")
     csvwriter = csv.writer(out_file)
     csvwriter.writerow(SongInfo._fields)
@@ -114,13 +137,18 @@ async def download_all_song_infos(cs: ClientSession, out_file: TextIO, n_workers
     for letter in letter_urls:
         task_queue.put_nowait(LetterFetch(letter))
 
-    async def worker():
+    currently_processing: int = n_workers
+
+    async def worker(pool: Executor):
+        nonlocal currently_processing
         while True:
+            currently_processing -= 1
             task = await task_queue.get()
+            currently_processing += 1
             for i in range(max_attempts):
                 logger.debug("Attempt %d/%d on %s", i + 1, max_attempts, task)
                 try:
-                    result = await task.fetch(cs, csvwriter)
+                    result = await task.fetch(cs, csvwriter, pool)
                 except Exception:
                     logger.exception('Error while fetching object %s', task)
                     continue
@@ -128,17 +156,19 @@ async def download_all_song_infos(cs: ClientSession, out_file: TextIO, n_workers
                     await task_queue.put(i)
                 break
 
-    tasks = [
-        asyncio.create_task(worker())
-        for _ in range(n_workers)
-    ]
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        tasks = [
+            asyncio.create_task(worker(pool))
+            for _ in range(n_workers)
+        ]
 
-    # Wait until the queue is fully processed.
-    await task_queue.join()
+        # Wait until the queue is fully processed.
+        while currently_processing > 0 or not task_queue.empty():
+            await task_queue.join()
 
-    # Cancel our worker tasks.
-    for task in tasks:
-        task.cancel()
+        # Cancel our worker tasks.
+        for task in tasks:
+            task.cancel()
 
     # Wait until all worker tasks are cancelled.
     await asyncio.gather(*tasks, return_exceptions=True)
