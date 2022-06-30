@@ -20,9 +20,8 @@ def cli():
 
 @cli.command()
 @click.option('-d', '--db', default='index.db', help='The database to use for indexing.', type=str)
-@click.option('-j', '--workers', default=400, help='Number of worker coroutines.', type=int)
-@click.option('-c', '--max-connections', default=100, help='Max number of connections.', type=int)
-def index(workers, max_connections, db):
+@click.option('-j', '--workers', default=20, help='Number of worker coroutines.', type=int)
+def index(workers, db):
     """Build an index of the files to download. This is needed before downloading the songs.
 
     NOTE: This command will destroy any existing index you have!"""

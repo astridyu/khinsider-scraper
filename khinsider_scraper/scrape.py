@@ -21,7 +21,7 @@ import requests
 from bs4 import BeautifulSoup
 from .model import create_tables
 
-from .parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_mp3_on_song_page, get_songs_on_album_page
+from .parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_mp3_on_song_page, get_songs_on_album_page, parse_album_name
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class ScrapeContext(NamedTuple):
     pool: ThreadPool
 
     def get_db(self) -> Connection:
-        return Connection(self.dburl)
+        return Connection(self.dburl, check_same_thread=False)
 
 
 def build_index(ctx: ScrapeContext) -> Iterable[SongInfo]:
@@ -43,6 +43,8 @@ def build_index(ctx: ScrapeContext) -> Iterable[SongInfo]:
         create_tables(db)
     enumerate_pages(ctx)
     enumerate_albums(ctx)
+    fetch_albums_info(ctx)
+    fetch_song_mp3_links(ctx)
 
 
 def enumerate_pages(ctx: ScrapeContext):
@@ -81,49 +83,63 @@ def enumerate_albums(ctx: ScrapeContext):
 
         logger.info(f'Got {len(links)} albums on page {page}')
 
-        with Connection(ctx.dburl) as conn:
-            conn.execute('INSERT INTO albumpages(page, visited) VALUES (?, 1) ON CONFLICT DO UPDATE SET visited = 1', (page,))
+        with ctx.get_db() as conn:
+            conn.execute('UPDATE albumpages SET visited = 1 WHERE page = ?', (page,))
             conn.executemany(
                 'INSERT INTO albums(album_url) VALUES (?) ON CONFLICT DO NOTHING',
                 ((l,) for l in links)        
             )
 
-    logger.info('Crawling unvisited pages')
+    logger.info('Crawling unvisited album listings')
     with ctx.get_db() as db:
         rows = db.execute('SELECT page FROM albumpages WHERE visited = 0')
-    ctx.pool.starmap(task, rows, chunksize=10)
+        ctx.pool.starmap(task, rows)
 
 
-async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
-    logger.info(f'Fetching song at URL {self.song.url}')
-    res = await cs.get(self.url)
-    html = await res.read()
+def fetch_albums_info(ctx: ScrapeContext):
+    def task(album_id: str, url: str):
+        logger.info(f'Fetching album at URL {url}')
+        html = requests.get(url).text
 
-    def parse():
         soup = BeautifulSoup(html, features='html5lib')
-        mp3 = get_mp3_on_song_page(soup, self.url)
-        return mp3
+        infos = list(get_songs_on_album_page(soup))
+        album_name = parse_album_name(soup)
 
-    mp3 = await asyncio.get_event_loop().run_in_executor(pool, parse)
+        logger.info(f'Got {len(infos)} songs on album {url}')
 
-    csvwriter.writerow(self.song._replace(url=mp3))
-    return []
+        with ctx.get_db() as conn:
+            conn.execute('UPDATE albums SET visited = 1, album_name = ? WHERE album_url = ?', (album_name, url))
+            conn.executemany(
+                'INSERT INTO songs(album_id, album_index, song_name, page_url) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                ((album_id, s.index, s.song_name, s.url) for s in infos)
+            )
+
+    logger.info('Crawling unvisited albums')
+    with ctx.get_db() as db:
+        rows = db.execute('SELECT album_id, album_url FROM albums WHERE visited = 0')
+        ctx.pool.starmap(task, rows)
 
 
-async def fetch(self, cs: ClientSession, csvwriter: csv.writer, pool: Executor) -> Iterable['FetchTask']:
-    logger.info(f'Fetching album at URL {self.url}')
-    res = await cs.get(self.url)
-    html = await res.read()
+def fetch_song_mp3_links(ctx: ScrapeContext):
+    def task(album_id: str, album_index: int, page_url: str):
+        logger.info(f'Fetching song at URL {page_url}')
+        html = requests.get(page_url).text
 
-    def parse():
         soup = BeautifulSoup(html, features='html5lib')
-        infos = list(get_songs_on_album_page(soup, self.url))
-        return infos
+        mp3_url = get_mp3_on_song_page(soup)
 
-    infos = await asyncio.get_event_loop().run_in_executor(pool, parse)
-    logger.info(f'Found {len(infos)} songs at {self.url}')
+        logger.info(f'Song at {page_url} has mp3 at {mp3_url}')
 
-    return (SongFetch(info) for info in infos)
+        with ctx.get_db() as conn:
+            conn.execute(
+                'UPDATE songs SET mp3_url = ?, visited = 1 WHERE album_id = ? AND album_index = ?',
+                (mp3_url, album_id, album_index)
+            )
+
+    logger.info('Crawling unvisited songs')
+    with ctx.get_db() as db:
+        rows = db.execute('SELECT album_id, album_index, page_url FROM albums WHERE visited = 0')
+        ctx.pool.starmap(task, rows)
 
 
 async def fetch_and_store_song(song: SongInfo, cs: ClientSession) -> Iterable['FetchTask']:
