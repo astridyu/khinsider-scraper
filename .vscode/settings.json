@@ -1,8 +1,9 @@
 {
-    "nixEnvSelector.nixFile": "${workspaceRoot}/flake.nix",
     "python.testing.pytestArgs": [
         "."
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "nixEnvSelector.suggestion": false,
+    "nixEnvSelector.nixFile": "${workspaceRoot}/shell.nix"
 }

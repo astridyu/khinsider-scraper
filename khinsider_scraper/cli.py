@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import csv
+from multiprocessing.pool import ThreadPool
 from sqlite3 import Connection
 import click
 import asyncio
@@ -26,12 +27,10 @@ def index(workers, max_connections, db):
 
     NOTE: This command will destroy any existing index you have!"""
 
-    async def main():
-        with Connection(db) as conn, ThreadPoolExecutor(workers) as exec:
-            async with ClientSession(connector=TCPConnector(limit=max_connections)) as cs:
-                await build_index(ScrapeContext(cs, conn, exec))
     logging.basicConfig(level=logging.DEBUG)
-    asyncio.run(main())
+
+    with Connection(db) as conn, ThreadPool(workers) as pool:
+        build_index(ScrapeContext(db, pool))
 
 
 @cli.command()
