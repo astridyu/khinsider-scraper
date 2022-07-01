@@ -4,6 +4,7 @@ runs
 .ipynb_*
 *.csv
 *.db
+*.db-journal
 .direnv
 .songcache
 songs

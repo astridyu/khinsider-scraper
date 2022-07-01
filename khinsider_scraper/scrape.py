@@ -1,27 +1,19 @@
-from multiprocessing.pool import ThreadPool
-from aiohttp import ClientSession
-from aiostream import stream
-
 import asyncio
-from concurrent.futures import Executor, ThreadPoolExecutor
-import csv
-from dataclasses import dataclass
-import itertools
 import logging
-from multiprocessing.dummy import current_process
+from concurrent.futures import Executor, ThreadPoolExecutor
+from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from sqlite3 import Connection
-import sys
-from tempfile import TemporaryFile
-import time
-from traceback import print_exception
-from typing import Coroutine, Iterable, List, NamedTuple, TextIO
+from typing import Iterable, NamedTuple
 
 import requests
+from aiohttp import ClientSession
 from bs4 import BeautifulSoup
-from .model import create_tables
 
-from .parse import SongInfo, get_album_links_on_letter_page, get_last_letter_page, get_mp3_on_song_page, get_songs_on_album_page, parse_album_name
+from .model import create_tables
+from .parse import (SongInfo, get_album_links_on_letter_page,
+                    get_last_letter_page, get_mp3_on_song_page,
+                    get_songs_on_album_page, parse_album_name)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +46,8 @@ def enumerate_pages(ctx: ScrapeContext):
             return
 
     logger.info(f'Counting number of pages of songs')
-    html = requests.get("https://downloads.khinsider.com/game-soundtracks").text
+    html = requests.get(
+        "https://downloads.khinsider.com/game-soundtracks").text
 
     soup1 = BeautifulSoup(html, features='html5lib')
     count = get_last_letter_page(soup1)
@@ -63,11 +56,11 @@ def enumerate_pages(ctx: ScrapeContext):
 
     with ctx.get_db() as db:
         db.executemany(
-            'INSERT INTO albums(album_url) VALUES (?)',
+            'INSERT INTO albums(album_url) VALUES (?) ON CONFLICT DO NOTHING',
             ((l,) for l in links)
         )
         db.executemany(
-            'INSERT INTO albumpages(page, visited) VALUES (?, ?)',
+            'INSERT INTO albumpages(page, visited) VALUES (?, ?) ON CONFLICT DO NOTHING',
             [(1, 1)] + [(i, 0) for i in range(2, count + 1)]
         )
 
@@ -83,17 +76,18 @@ def enumerate_albums(ctx: ScrapeContext):
 
         logger.info(f'Got {len(links)} albums on page {page}')
 
-        with ctx.get_db() as conn:
-            conn.execute('UPDATE albumpages SET visited = 1 WHERE page = ?', (page,))
-            conn.executemany(
-                'INSERT INTO albums(album_url) VALUES (?) ON CONFLICT DO NOTHING',
-                ((l,) for l in links)        
-            )
+        return page, links
 
     logger.info('Crawling unvisited album listings')
-    with ctx.get_db() as db:
-        rows = db.execute('SELECT page FROM albumpages WHERE visited = 0')
-        ctx.pool.starmap(task, rows)
+    with ctx.get_db() as conn:
+        rows = conn.execute('SELECT page FROM albumpages WHERE visited = 0')
+        for page, links in ctx.pool.imap_unordered(lambda r: task(*r), rows, chunksize=2):
+            conn.execute(
+                'UPDATE albumpages SET visited = 1 WHERE page = ?', (page,))
+            conn.executemany(
+                'INSERT INTO albums(album_url) VALUES (?) ON CONFLICT DO NOTHING',
+                ((l,) for l in links)
+            )
 
 
 def fetch_albums_info(ctx: ScrapeContext):
@@ -107,17 +101,19 @@ def fetch_albums_info(ctx: ScrapeContext):
 
         logger.info(f'Got {len(infos)} songs on album {url}')
 
-        with ctx.get_db() as conn:
-            conn.execute('UPDATE albums SET visited = 1, album_name = ? WHERE album_url = ?', (album_name, url))
-            conn.executemany(
-                'INSERT INTO songs(album_id, album_index, song_name, page_url) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
-                ((album_id, s.index, s.song_name, s.url) for s in infos)
-            )
+        return album_id, album_name, infos
 
     logger.info('Crawling unvisited albums')
-    with ctx.get_db() as db:
-        rows = db.execute('SELECT album_id, album_url FROM albums WHERE visited = 0')
-        ctx.pool.starmap(task, rows)
+    with ctx.get_db() as conn:
+        rows = conn.execute(
+            'SELECT album_id, album_url FROM albums WHERE visited = 0')
+        for album_id, album_name, infos in ctx.pool.imap_unordered(lambda r: task(*r), rows, chunksize=16):
+            conn.execute(
+                'UPDATE albums SET visited = 1, album_name = ? WHERE album_id = ?', (album_name, album_id))
+            conn.executemany(
+                'INSERT INTO songs(album, album_index, song_name, page_url) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+                ((album_id, s.index, s.song_name, s.url) for s in infos)
+            )
 
 
 def fetch_song_mp3_links(ctx: ScrapeContext):
@@ -130,16 +126,17 @@ def fetch_song_mp3_links(ctx: ScrapeContext):
 
         logger.info(f'Song at {page_url} has mp3 at {mp3_url}')
 
-        with ctx.get_db() as conn:
-            conn.execute(
-                'UPDATE songs SET mp3_url = ?, visited = 1 WHERE album_id = ? AND album_index = ?',
-                (mp3_url, album_id, album_index)
-            )
+        return album_id, album_index, mp3_url
 
     logger.info('Crawling unvisited songs')
-    with ctx.get_db() as db:
-        rows = db.execute('SELECT album_id, album_index, page_url FROM albums WHERE visited = 0')
-        ctx.pool.starmap(task, rows)
+    with ctx.get_db() as conn:
+        rows = conn.execute(
+            'SELECT album, album_index, page_url FROM songs WHERE visited = 0')
+        for album_id, album_index, mp3_url in ctx.pool.imap_unordered(lambda r: task(*r), rows, chunksize=32):
+            conn.execute(
+                'UPDATE songs SET mp3_url = ?, visited = 1 WHERE album = ? AND album_index = ?',
+                (mp3_url, album_id, album_index)
+            )
 
 
 async def fetch_and_store_song(song: SongInfo, cs: ClientSession) -> Iterable['FetchTask']:
@@ -210,4 +207,3 @@ async def download_all_song_infos(cs: ClientSession, db: Connection, n_workers=5
 
     # Wait until all worker tasks are cancelled.
     await asyncio.gather(*tasks, return_exceptions=True)
-

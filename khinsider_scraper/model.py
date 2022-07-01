@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS albums(
 
 CREATE TABLE IF NOT EXISTS songs(
     visited INTEGER DEFAULT 0,
-    album_id TEXT REFERENCES albums(album_id),
+    album TEXT REFERENCES albums(album_id),
     album_index INTEGER,
     song_name TEXT,
     page_url TEXT UNIQUE,
