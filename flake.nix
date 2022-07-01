@@ -21,11 +21,18 @@
                 projectDir = ./.;
                 preferWheels = true;
               };
+
+            khinsider-scraper-docker = pkgs.dockerTools.buildImage {
+              name = "ghcr.io/astridyu/khinsider-scraper";
+              contents = self.packages."${system}".khinsider-scraper;
+              config = { Cmd = [ "${pkgs.bashInteractive}/bin/bash" ]; };
+            };
           };
 
           apps = {
-            khinsider-scraper =
-              utils.lib.mkApp { drv = self.packages."${system}".khinsider-scraper; };
+            khinsider-scraper = utils.lib.mkApp {
+              drv = self.packages."${system}".khinsider-scraper;
+            };
             default = self.apps.${system}.khinsider-scraper;
           };
         };
