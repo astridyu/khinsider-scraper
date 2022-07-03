@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS songs(
     page_url TEXT UNIQUE,
     mp3_url TEXT UNIQUE,
 
-    PRIMARY KEY (album_id, album_index)
+    PRIMARY KEY (album, album_index)
 );
 '''
 
